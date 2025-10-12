@@ -1,0 +1,181 @@
+import torch
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+import timm
+from ultralytics import YOLO
+import numpy as np
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+from tqdm import tqdm
+import os
+
+# -----------------------------------------------------------------------------
+# 1. PAINEL DE CONTROLO - AJUSTE ESTES PARÂMETROS
+# -----------------------------------------------------------------------------
+
+# --- Definições do Modelo ---
+# Escolha o tipo de modelo: 'vit' ou 'yolo'
+MODEL_TYPE = 'vit'
+# Caminho para os pesos do seu modelo treinado
+MODEL_WEIGHTS_PATH = '/lapix/vit_base_multilabel_best.pth'
+
+# --- Definições do Dataset Público ---
+PUBLIC_DATASET_PATH = 'LISC_cropped'
+
+# --- Configurações de Avaliação ---
+IMAGE_SIZE = 384 if MODEL_TYPE == 'vit' else 640
+BATCH_SIZE = 32
+
+# --- MAPEAMENTO DE CLASSES (A PARTE MAIS IMPORTANTE) ---
+# Mapeie o nome da pasta do dataset público (chave) para o nome da classe do SEU modelo (valor)
+# Adapte este dicionário para cada dataset que for testar!
+CLASS_MAPPING = {
+    # Mapeamento CORRIGIDO para o dataset LISC (case-sensitive)
+    'Baso': 'Basofilo',
+    'eosi': 'Eosinofilo',
+    'lymp': 'Linfocito',
+    'mono': 'Monocito',
+    'neut': 'Neutrofilo segmentado',
+    # Ignorar a pasta 'mixt' que existe no LISC mas não nos interessa
+    'mixt': None
+}
+
+# Lista das 14 classes com as quais SEU MODELO foi treinado, na ordem EXATA de treino
+# (Baseado na sua extração do _classes.csv)
+YOUR_MODEL_CLASSES = [
+    'Artefato', 'Basofilo', 'Bastonete', 'Blasto', 'Eosinofilo', 'Eritroblasto',
+    'Linfocito', 'Linfocito atipico', 'Metamielocito', 'Mielocito', 'Monocito',
+    'Neutrofilo segmentado', 'Promielocito', 'Restos celulares'
+]
+
+# -----------------------------------------------------------------------------
+# 2. LÓGICA DO SCRIPT (Normalmente não precisa de alterar abaixo)
+# -----------------------------------------------------------------------------
+
+def load_model(model_type, weights_path, num_classes):
+    """Carrega o modelo (ViT ou YOLO) com os pesos treinados."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🚀 Usando dispositivo: {device}")
+
+    model = None
+    if model_type == 'vit':
+        model = timm.create_model('vit_base_patch16_384', pretrained=False, num_classes=num_classes)
+        model.load_state_dict(torch.load(weights_path, map_location=device))
+        print("✅ Modelo ViT carregado com sucesso.")
+    elif model_type == 'yolo':
+        model = YOLO(weights_path)
+        print("✅ Modelo YOLO carregado com sucesso.")
+    else:
+        raise ValueError("Tipo de modelo inválido. Escolha 'vit' ou 'yolo'.")
+
+    if model:
+        model.to(device)
+        model.eval()
+    return model, device
+
+def get_data_loader(dataset_path, image_size, batch_size):
+    """Cria um DataLoader para o dataset público."""
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"O diretório do dataset público não foi encontrado em: {dataset_path}")
+        
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    dataset = datasets.ImageFolder(root=dataset_path, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    print(f"\n📁 Dataset público carregado de: {dataset_path}")
+    print(f"Found classes: {dataset.classes}")
+    return loader, dataset.classes
+
+def evaluate(model, loader, device, model_type, model_classes, public_classes, class_mapping):
+    """Executa a avaliação e retorna as predições e rótulos verdadeiros."""
+    all_preds = []
+    all_labels = []
+    
+    idx_to_model_class = {i: name for i, name in enumerate(model_classes)}
+
+    with torch.no_grad():
+        for images, labels in tqdm(loader, desc="🧪 Avaliando"):
+            images = images.to(device)
+            
+            outputs = None
+            if model_type == 'vit':
+                outputs = model(images)
+            elif model_type == 'yolo':
+                results = model(images)
+                outputs = torch.stack([res.probs.data for res in results]).to(device)
+
+            _, predicted_indices = torch.max(outputs, 1)
+
+            predicted_indices = predicted_indices.cpu().numpy()
+            labels = labels.cpu().numpy()
+
+            for i in range(len(labels)):
+                true_public_class_name = public_classes[labels[i]]
+                mapped_model_class_name = class_mapping.get(true_public_class_name)
+
+                if mapped_model_class_name is None:
+                    continue
+
+                pred_model_class_name = idx_to_model_class[predicted_indices[i]]
+
+                all_labels.append(mapped_model_class_name)
+                all_preds.append(pred_model_class_name)
+
+    return all_labels, all_preds
+
+def generate_report(true_labels, pred_labels, mapped_classes):
+    """Gera e exibe o relatório de classificação e a matriz de confusão."""
+    print("\n\n--- 📊 Relatório de Classificação no Dataset Público ---")
+    
+    target_names = sorted(list(set(mapped_classes)))
+    
+    # CORREÇÃO: Adicionado o parâmetro 'labels=target_names' para forçar
+    # a avaliação apenas nas classes de interesse, resolvendo o ValueError.
+    report = classification_report(true_labels, pred_labels, labels=target_names, target_names=target_names, zero_division=0)
+    print(report)
+
+    cm = confusion_matrix(true_labels, pred_labels, labels=target_names)
+    df_cm = pd.DataFrame(cm, index=target_names, columns=target_names)
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(df_cm, annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Matriz de Confusão - {os.path.basename(PUBLIC_DATASET_PATH)}')
+    plt.ylabel('Classe Verdadeira')
+    plt.xlabel('Classe Predita')
+    plt.tight_layout()
+    
+    output_filename = f"matriz_confusao_{os.path.basename(PUBLIC_DATASET_PATH)}.png"
+    plt.savefig(output_filename)
+    print(f"\n💾 Matriz de confusão salva em: {output_filename}")
+    plt.show()
+
+def main():
+    """Função principal que orquestra o processo."""
+    model, device = load_model(MODEL_TYPE, MODEL_WEIGHTS_PATH, len(YOUR_MODEL_CLASSES))
+    loader, public_classes = get_data_loader(PUBLIC_DATASET_PATH, IMAGE_SIZE, BATCH_SIZE)
+
+    mapped_classes_to_evaluate = [v for v in CLASS_MAPPING.values() if v is not None]
+    print(f"Classes mapeadas para avaliação: {sorted(mapped_classes_to_evaluate)}")
+    
+    # Validação do mapeamento
+    for public_cls in CLASS_MAPPING.keys():
+        if public_cls not in public_classes:
+            print(f"⚠️ Aviso: A classe '{public_cls}' do seu mapeamento não foi encontrada nas pastas do dataset.")
+
+    true_labels, pred_labels = evaluate(model, loader, device, MODEL_TYPE, YOUR_MODEL_CLASSES, public_classes, CLASS_MAPPING)
+
+    if not true_labels:
+        print("\n❌ Nenhuma amostra foi avaliada. Verifique se os nomes das pastas do dataset público correspondem às chaves do CLASS_MAPPING.")
+        return
+
+    generate_report(true_labels, pred_labels, mapped_classes_to_evaluate)
+
+if __name__ == '__main__':
+    main()
