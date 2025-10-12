@@ -1,0 +1,107 @@
+import cv2
+import numpy as np
+import os
+from tqdm import tqdm
+
+# -----------------------------------------------------------------------------
+# 1. PAINEL DE CONTROLO - AJUSTE ESTES PARÂMETROS
+# -----------------------------------------------------------------------------
+
+# Caminho para a pasta raiz do dataset público original (com imagens afastadas)
+INPUT_DATASET_PATH = 'LISC/LISC Database/Main Dataset'
+
+# Caminho para a nova pasta onde as imagens recortadas serão guardadas
+OUTPUT_DATASET_PATH = 'LISC_cropped'
+
+# Parâmetros de recorte (pode precisar de ajustar)
+# Margem adicionada ao redor da célula encontrada (em pixels) para garantir que o citoplasma seja incluído.
+PADDING = 40
+
+# -----------------------------------------------------------------------------
+# 2. LÓGICA DO SCRIPT (Normalmente não precisa de alterar abaixo)
+# -----------------------------------------------------------------------------
+
+def find_and_crop_cell(image_path, padding):
+    """
+    Encontra a célula (baseado na cor do núcleo) numa imagem e recorta-a.
+    Retorna a imagem recortada ou None se nenhuma célula for encontrada.
+    """
+    # Carregar a imagem com OpenCV
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+
+    # Converter para o espaço de cor HSV (melhor para segmentação de cor)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # Definir o intervalo de cor para o roxo/azul dos núcleos de leucócitos
+    # Estes valores podem precisar de ajustes finos se a cor variar muito
+    lower_purple = np.array([125, 40, 40])
+    upper_purple = np.array([165, 255, 255])
+
+    # Criar uma máscara com os pixels que estão dentro do intervalo de cor
+    mask = cv2.inRange(hsv, lower_purple, upper_purple)
+
+    # Encontrar os contornos na máscara
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        # Se nenhum contorno roxo for encontrado, tentar uma abordagem de limiar
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None # Não foi possível encontrar a célula
+
+    # Encontrar o maior contorno (que deve ser o núcleo da célula principal)
+    largest_contour = max(contours, key=cv2.contourArea)
+
+    # Obter a caixa delimitadora (bounding box) do maior contorno
+    x, y, w, h = cv2.boundingRect(largest_contour)
+
+    # Adicionar a margem (padding) para incluir o citoplasma
+    x1 = max(0, x - padding)
+    y1 = max(0, y - padding)
+    x2 = min(img.shape[1], x + w + padding)
+    y2 = min(img.shape[0], y + h + padding)
+
+    # Recortar a imagem original usando as coordenadas calculadas
+    cropped_image = img[y1:y2, x1:x2]
+
+    return cropped_image
+
+def main():
+    """
+    Função principal que percorre o dataset, recorta as imagens e guarda-as.
+    """
+    if not os.path.exists(INPUT_DATASET_PATH):
+        print(f"❌ Erro: O diretório de entrada não foi encontrado: {INPUT_DATASET_PATH}")
+        return
+
+    os.makedirs(OUTPUT_DATASET_PATH, exist_ok=True)
+    print(f"📁 A guardar imagens recortadas em: {OUTPUT_DATASET_PATH}")
+
+    class_folders = [d for d in os.listdir(INPUT_DATASET_PATH) if os.path.isdir(os.path.join(INPUT_DATASET_PATH, d))]
+
+    for class_name in tqdm(class_folders, desc="Processando Classes"):
+        input_class_dir = os.path.join(INPUT_DATASET_PATH, class_name)
+        output_class_dir = os.path.join(OUTPUT_DATASET_PATH, class_name)
+        os.makedirs(output_class_dir, exist_ok=True)
+
+        image_files = [f for f in os.listdir(input_class_dir) if f.lower().endswith(('.bmp', '.jpg', '.png'))]
+
+        for image_name in tqdm(image_files, desc=f"  Recortando {class_name}", leave=False):
+            input_path = os.path.join(input_class_dir, image_name)
+            output_path = os.path.join(output_class_dir, image_name)
+
+            cropped_img = find_and_crop_cell(input_path, PADDING)
+
+            if cropped_img is not None and cropped_img.size > 0:
+                cv2.imwrite(output_path, cropped_img)
+            else:
+                print(f"⚠️ Não foi possível encontrar/recortar a célula em: {input_path}")
+
+    print("\n✅ Processo de recorte concluído!")
+
+if __name__ == '__main__':
+    main()
