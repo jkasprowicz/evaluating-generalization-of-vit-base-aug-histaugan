@@ -1,0 +1,21 @@
+!unzip /lapix/LISC.zip -d /lapix/LISC
+
+import pandas as pd
+
+# Load your CSV file
+df = pd.read_csv("/lapix/dataset_classes/test/_classes.csv")
+
+# Extract all column names except 'filename'
+class_names = df.columns[1:].tolist()
+print(class_names)
+
+lisc_to_model = {
+    'Baso': 'Basofilo',
+    'Eosi': 'Eosinofilo',
+    'Lymp': 'Linfocito',
+    'Mono': 'Monocito',
+    'Neu': 'Neutrofilo segmentado'
+}
+
+# [1, 4, 6, 10, 11] 
+
