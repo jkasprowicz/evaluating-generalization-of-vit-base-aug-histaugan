@@ -1,0 +1,106 @@
+import os
+import torch
+from torchvision import transforms, datasets
+from torch.utils.data import DataLoader
+import timm
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# --- Paths ---
+MODEL_WEIGHTS_PATH = '/lapix/vit_base_multilabel_best.pth'
+LISC_DATASET_PATH = '/lapix/LISC_cropped'
+
+# --- Your 14 classes ---
+CLASS_NAMES = [
+    'Artefato', 'Basofilo', 'Bastonete', 'Blasto', 'Eosinofilo', 'Eritroblasto',
+    'Linfocito', 'Linfocito atipico', 'Metamielocito', 'Mielocito', 'Monocito',
+    'Neutrofilo segmentado', 'Promielocito', 'Restos celulares'
+]
+
+# --- Mapping LISC classes to your model classes ---
+LISC_TO_MODEL = {
+    'Baso': 'Basofilo',
+    'eosi': 'Eosinofilo',
+    'lymp': 'Linfocito',
+    'mono': 'Monocito',
+    'neut': 'Neutrofilo segmentado'
+}
+
+# --- Transformations ---
+transform = transforms.Compose([
+    transforms.Resize((384, 384)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+# --- Load LISC dataset ---
+lisc_dataset = datasets.ImageFolder(root=LISC_DATASET_PATH, transform=transform)
+lisc_loader = DataLoader(lisc_dataset, batch_size=16, shuffle=False, num_workers=2)
+
+# --- Load fine-tuned model ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = timm.create_model('vit_base_patch16_384', pretrained=False, num_classes=len(CLASS_NAMES))
+model.load_state_dict(torch.load(MODEL_WEIGHTS_PATH, map_location=device))
+model.to(device)
+model.eval()
+
+# --- Evaluation ---
+# --- Evaluation ---
+y_true, y_pred = [], []
+
+with torch.no_grad():
+    for images, labels in tqdm(lisc_loader, desc="🔍 Evaluando LISC"):
+        images = images.to(device)
+        outputs = model(images)
+        preds = torch.sigmoid(outputs)
+        # Single-label prediction
+        y_pred_single = torch.argmax(preds, dim=1).cpu().numpy()
+
+        for i, l in enumerate(labels):
+            lisc_class_name = lisc_dataset.classes[l]
+            mapped_name = LISC_TO_MODEL.get(lisc_class_name)
+            if mapped_name is None:
+                continue  # skip unmapped classes
+            true_index = CLASS_NAMES.index(mapped_name)
+            y_true.append(true_index)
+            y_pred.append(y_pred_single[i])  # only append matching prediction
+
+
+# --- Filter classes to only those present in LISC ---
+cm_labels = [LISC_TO_MODEL[c] for c in lisc_dataset.classes if c in LISC_TO_MODEL]
+cm_indices = [CLASS_NAMES.index(c) for c in cm_labels]
+
+filtered_y_true = [yt for yt in y_true if yt in cm_indices]
+filtered_y_pred = [yp for yp, yt in zip(y_pred, y_true) if yt in cm_indices]
+
+# --- Confusion Matrix ---
+cm = confusion_matrix(filtered_y_true, filtered_y_pred, labels=cm_indices)
+cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+
+plt.figure(figsize=(8,6))
+sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues",
+            xticklabels=cm_labels, yticklabels=cm_labels)
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title("Confusion Matrix – LISC Dataset")
+plt.tight_layout()
+plt.savefig("lisc_confusion_matrix.png")
+plt.show()
+
+# --- Accuracy and Classification Report ---
+accuracy = accuracy_score(filtered_y_true, filtered_y_pred)
+print(f"\n✅ Overall Accuracy on LISC Dataset: {accuracy*100:.2f}%")
+
+report = classification_report(
+    filtered_y_true, filtered_y_pred,
+    labels=cm_indices, target_names=cm_labels, zero_division=0,
+    output_dict=True
+)
+report_df = pd.DataFrame(report).transpose()
+print("\n📊 Classification Report (LISC Classes Only):")
+print(report_df)
+report_df.to_csv("lisc_classification_report.csv", index=True)
+print("\n💾 Report saved to 'lisc_classification_report.csv'")
