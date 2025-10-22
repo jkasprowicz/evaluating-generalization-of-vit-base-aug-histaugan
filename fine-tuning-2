@@ -1,0 +1,119 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torch.cuda.amp import GradScaler, autocast
+import timm
+import os
+
+# ==========================================================
+# 1️⃣ Configurações iniciais
+# ==========================================================
+DEVICE = "cuda:5"
+torch.cuda.set_device(DEVICE)
+
+PBC_CLASS_NAMES = [
+    'basophil', 'eosinophil', 'erythroblast', 
+    'lymphocyte', 'monocyte', 'neutrophil'
+]
+NUM_CLASSES = len(PBC_CLASS_NAMES)
+MODEL_WEIGHTS_PATH = "vit_base_multilabel_best.pth"
+PBC_DATASET_PATH = '/lapix/pbc_dataset/PBC_dataset_split/PBC_dataset_split'
+BATCH_SIZE = 4
+LR = 5e-5
+EPOCHS = 5
+
+# ==========================================================
+# 2️⃣ Data transforms
+# ==========================================================
+train_transforms = transforms.Compose([
+    transforms.Resize((384, 384)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+])
+
+val_transforms = transforms.Compose([
+    transforms.Resize((384, 384)),
+    transforms.ToTensor(),
+])
+
+# ==========================================================
+# 3️⃣ DataLoader
+# ==========================================================
+train_dataset = datasets.ImageFolder(os.path.join(PBC_DATASET_PATH, "Train"), transform=train_transforms)
+val_dataset = datasets.ImageFolder(os.path.join(PBC_DATASET_PATH, "Val"), transform=val_transforms)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+
+# ==========================================================
+# 4️⃣ Criar modelo ViT Base e carregar pesos
+# ==========================================================
+model = timm.create_model(
+    'vit_base_patch16_384',
+    pretrained=False,
+    num_classes=14,  # carregar pesos originais do modelo
+)
+
+state_dict = torch.load(MODEL_WEIGHTS_PATH, map_location="cpu")
+model.load_state_dict(state_dict)
+print("✅ Pesos carregados com sucesso")
+
+# Gradient checkpointing
+model.set_grad_checkpointing(True)
+
+# ==========================================================
+# 4️⃣a Substituir cabeça para 6 classes do PBC
+# ==========================================================
+model.head = nn.Linear(model.head.in_features, NUM_CLASSES)
+print(f"✅ Cabeça do modelo substituída para {NUM_CLASSES} classes do PBC")
+
+# Congelar backbone
+for name, param in model.named_parameters():
+    if "head" not in name:
+        param.requires_grad = False
+
+# ==========================================================
+# 5️⃣ Mover para GPU
+# ==========================================================
+torch.cuda.empty_cache()
+model.to(DEVICE)
+print("✅ Modelo movido para GPU")
+
+# ==========================================================
+# 6️⃣ Otimizador e loss
+# ==========================================================
+optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LR)
+criterion = nn.BCEWithLogitsLoss()  # multilabel
+scaler = GradScaler()  # FP16
+
+# ==========================================================
+# 7️⃣ Loop de treino
+# ==========================================================
+for epoch in range(EPOCHS):
+    model.train()
+    running_loss = 0.0
+    for batch in train_loader:
+        inputs, targets = batch
+        inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+
+        # One-hot para BCEWithLogitsLoss
+        targets_onehot = torch.zeros(targets.size(0), NUM_CLASSES, device=DEVICE)
+        targets_onehot.scatter_(1, targets.unsqueeze(1), 1.0)
+
+        optimizer.zero_grad()
+
+        with autocast():  # FP16
+            outputs = model(inputs)
+            loss = criterion(outputs, targets_onehot)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        running_loss += loss.item() * inputs.size(0)
+
+    epoch_loss = running_loss / len(train_loader.dataset)
+    print(f"Epoch {epoch+1}/{EPOCHS} concluída, Loss: {epoch_loss:.4f}")
+
+print("✅ Fine-tuning leve concluído!")
