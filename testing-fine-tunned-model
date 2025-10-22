@@ -1,0 +1,44 @@
+import torch
+from sklearn.metrics import classification_report, confusion_matrix
+import numpy as np
+
+# ==========================================================
+# 1️⃣ Avaliação no conjunto de validação
+# ==========================================================
+model.eval()
+y_true, y_pred = [], []
+
+with torch.no_grad():
+    for inputs, labels in val_loader:
+        inputs = inputs.to(DEVICE)
+        labels = labels.to(DEVICE)
+
+        with torch.amp.autocast('cuda'):
+            outputs = model(inputs)
+            preds = torch.argmax(outputs, dim=1)  # predicted class index
+
+        y_true.extend(labels.cpu().numpy())
+        y_pred.extend(preds.cpu().numpy())
+
+# ==========================================================
+# 2️⃣ Cálculo das métricas
+# ==========================================================
+class_names = val_dataset.classes  # automatically read from folder names
+
+print("✅ Classes:", class_names)
+print("\n📊 Classification Report:")
+print(classification_report(y_true, y_pred, target_names=class_names, digits=4))
+
+# ==========================================================
+# 3️⃣ Matriz de confusão
+# ==========================================================
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(8,6))
+sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names)
+plt.xlabel('Predito')
+plt.ylabel('Real')
+plt.title('Matriz de Confusão - PBC Validation Set')
+plt.show()
